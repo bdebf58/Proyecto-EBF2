@@ -1,0 +1,6 @@
+- Secuencias de Rna / Dna / proteina faltantes (3 secuencias e cada gen) (Ej: otrologo de glyzine 3 secuencias)
+- Arreglar reprensentacion sinetina y exones (añadir ram)
+- Añadir columna "Gen_id" para poder hacer la conversion con la función. 
+- Descentralizar la bd para usuarios casuales.
+- punto 5 Función para comparar las secuencias de RNA entre 2 especies distintas.
+- punto 6 Función para comprobar la longitud del 3 UTR de 2 especies 
