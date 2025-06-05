@@ -2,6 +2,12 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import plotly.express as px
+import os
+from BCBio import GFF
+from Bio import SeqIO
+import gzip
+import io
+import re
 
 DB_PATH = "species_records.db"
 
@@ -25,9 +31,37 @@ def update_record(record_id, field, value):
 def export_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
+def listar_archivos_desde_data(extensiones):
+    carpeta = "data"
+    if not os.path.exists(carpeta):
+        return []
+    return [f for f in os.listdir(carpeta) if any(f.endswith(ext) for ext in extensiones)]
+
+# Helper para cargar archivo (de streamlit u open local)
+def cargar_archivo_con_opcion(label, extensiones, key_prefix):
+    fuente = st.radio(f"Selecciona origen del archivo para {label}:", ["Subir desde PC", "Elegir desde carpeta 'data'"], key=key_prefix+"_fuente")
+
+    archivo = None
+    archivo_nombre = None
+
+    if fuente == "Subir desde PC":
+        archivo = st.file_uploader(f"Sube archivo {label} aquí", type=extensiones, key=key_prefix+"_upload")
+        if archivo is not None:
+            archivo_nombre = archivo.name
+    else:
+        archivos = listar_archivos_desde_data(extensiones)
+        archivo_sel = st.selectbox(f"Selecciona archivo {label} desde carpeta 'data'", archivos, key=key_prefix+"_select")
+        if archivo_sel:
+            ruta = os.path.join("data", archivo_sel)
+            archivo = open(ruta, "rb")
+            archivo_nombre = archivo_sel
+
+    return archivo, archivo_nombre, fuente
+
+
 # Interfaz Streamlit
 st.set_page_config(layout="wide")
-st.title("🧬 Proyecto Rafael - Base de Datos EBF2")
+st.title("🧬Base de Datos EBF2")
 
 tab1, tab2, tab3 = st.tabs(["📋 Ver tabla", "✏️ Editar registros", "📊 Visualización & Exportación"])
 
@@ -74,14 +108,16 @@ with tab3:
     st.download_button("📤 Descargar CSV", export_csv(df), file_name="EBF2_records_export.csv", mime="text/csv")
 
 
+
 from gff_utils import extract_exons_utr3
 
 with st.expander("📥 Analizar exones y 3'UTR desde archivo GFF3 (.gff3/.gz)"):
-    gff_file = st.file_uploader("Sube archivo .gff3 o .gff3.gz", type=["gff3", "gz"], key="gff_exons")
+    gff_file, gff_file_name, fuente = cargar_archivo_con_opcion("GFF3 (.gff3/.gz)", [ "gff3", "gz"], "gff_exons")
     gene_id_input = st.text_input("ID del gen ortólogo (ej: AT5G25350)", key="gene_input")
 
     if gff_file and gene_id_input:
-        is_gz = gff_file.name.endswith(".gz")
+        is_gz = gff_file_name.endswith(".gz") if gff_file_name else False
+
         num_exons, utr3_len = extract_exons_utr3(gff_file, gene_id_input, is_gz=is_gz)
         st.success(f"Número de exones: {num_exons} | Longitud del 3'UTR: {utr3_len} nt")
 
@@ -93,16 +129,19 @@ with st.expander("📥 Analizar exones y 3'UTR desde archivo GFF3 (.gff3/.gz)"):
             conn.close()
             st.success("Base de datos actualizada con éxito.")
 
+            if fuente == "Elegir desde carpeta 'data'":
+                gff_file.close()  # cerrar archivo abierto localmente
+
+
 
 from synteny_utils import extract_neighbors
 
 with st.expander("🧬 Analizar genes vecinos (sintenia)"):
-
-    gff_file_synt = st.file_uploader("Sube archivo .gff3 o .gff3.gz para sintenia", type=["gff3", "gz"], key="gff_synt")
+    gff_file_synt, gff_file_synt_name, fuente_synt = cargar_archivo_con_opcion("GFF3 (.gff3/.gz) para sintenia", ["gff3", "gz"], "gff_synt")
     gene_id_synt = st.text_input("ID del gen ortólogo a comparar (ej: AT5G25350)", key="gene_synt")
 
     if gff_file_synt and gene_id_synt:
-        is_gz = gff_file_synt.name.endswith(".gz")
+        is_gz = gff_file_synt_name.endswith(".gz") if gff_file_synt_name else False
         center, upstream, downstream = extract_neighbors(gff_file_synt, gene_id_synt, is_gz=is_gz)
 
         if center:
@@ -116,65 +155,67 @@ with st.expander("🧬 Analizar genes vecinos (sintenia)"):
         else:
             st.error("No se encontró el gen en el archivo GFF.")
 
+        if fuente_synt == "Elegir desde carpeta 'data'":
+            gff_file_synt.close()
+
 
 from protein_to_gene_utils import find_gene_id_from_protein
 
 with st.expander("🔍 Buscar ID de gen desde ID de proteína (archivo GFF)"):
-    gff_protein_file = st.file_uploader("Sube archivo .gff3 o .gz para búsqueda", type=["gff3", "gz"], key="gff_protein")
+    gff_protein_file, gff_protein_file_name, fuente_prot = cargar_archivo_con_opcion("GFF3 (.gff3/.gz) para búsqueda", ["gff3", "gz"], "gff_protein")
     protein_id_input = st.text_input("ID de proteína ortóloga (ej: XP_006842065.1)", key="prot_input")
 
     if gff_protein_file and protein_id_input:
-        is_gz = gff_protein_file.name.endswith(".gz")
-        if gff_protein_file is not None and protein_id_input:
-            gene_id_result = find_gene_id_from_protein(gff_protein_file, protein_id_input)
-            if gene_id_result:
-                st.success(f"Gene ID correspondiente: {gene_id_result}")
-            else:
-                st.error("No se encontró un gene ID correspondiente en el archivo.")
+        gene_id_result = find_gene_id_from_protein(gff_protein_file, protein_id_input)
+        if gene_id_result:
             st.success(f"Gene ID correspondiente: {gene_id_result}")
         else:
             st.error("No se encontró un gene ID correspondiente en el archivo.")
 
+        if fuente_prot == "Elegir desde carpeta 'data'":
+            gff_protein_file.close()
 
 with st.expander("🔄 Buscar gene ID y analizar genes vecinos automáticamente"):
-    gff_combo_file = st.file_uploader("Sube archivo .gff3 o .gz", type=["gff3", "gz"], key="gff_combo")
+    gff_combo_file, gff_combo_file_name, fuente_combo = cargar_archivo_con_opcion("GFF3 (.gff3/.gz)", ["gff3", "gz"], "gff_combo")
     protein_input = st.text_input("ID de proteína ortóloga (ej: XP_006842065.1)", key="prot_combo_input")
 
-if gff_combo_file and protein_input:
-    found_gene = find_gene_id_from_protein(gff_combo_file, protein_input)
+    if gff_combo_file and protein_input:
+        found_gene = find_gene_id_from_protein(gff_combo_file, protein_input)
 
-    if found_gene:
-        st.success(f"Gene ID correspondiente: {found_gene}")
-        is_gz = gff_combo_file.name.endswith(".gz")
-        center, upstream, downstream = extract_neighbors(gff_combo_file, found_gene, is_gz=is_gz)
+        if found_gene:
+            st.success(f"Gene ID correspondiente: {found_gene}")
+            is_gz = gff_combo_file_name.endswith(".gz") if gff_combo_file_name else False
+            center, upstream, downstream = extract_neighbors(gff_combo_file, found_gene, is_gz=is_gz)
 
-        if center:
-            st.info(f"🧬 Gen central: {center['gene']} ({center['start']} - {center['end']})")
-            st.markdown("**⬆️ Genes upstream:**")
-            for u in upstream:
-                st.write(f"↖️ {u['gene']} ({u['start']} - {u['end']})")
-            st.markdown("**⬇️ Genes downstream:**")
-            for d in downstream:
-                st.write(f"↘️ {d['gene']} ({d['start']} - {d['end']})")
+            if center:
+                st.info(f"🧬 Gen central: {center['gene']} ({center['start']} - {center['end']})")
+                st.markdown("**⬆️ Genes upstream:**")
+                for u in upstream:
+                    st.write(f"↖️ {u['gene']} ({u['start']} - {u['end']})")
+                st.markdown("**⬇️ Genes downstream:**")
+                for d in downstream:
+                    st.write(f"↘️ {d['gene']} ({d['start']} - {d['end']})")
+            else:
+                st.warning("Gene ID encontrado, pero no se pudo analizar vecinos.")
         else:
-            st.warning("Gene ID encontrado, pero no se pudo analizar vecinos.")
-    else:
-        st.error("No se encontró un gene ID para ese ID de proteína.")
+            st.error("No se encontró un gene ID para ese ID de proteína.")
 
+        if fuente_combo == "Elegir desde carpeta 'data'":
+            gff_combo_file.close()
 
 
 with st.expander("🧬 Comparar genes vecinos entre dos especies (sintenia comparada)"):
     col1, col2 = st.columns(2)
     with col1:
-        gff_species_a = st.file_uploader("📂 GFF3 especie A (referencia, ej. Arabidopsis)", type=["gff3", "gz"], key="gff_species_a")
+        gff_species_a, gff_species_a_name, fuente_a = cargar_archivo_con_opcion("GFF3 especie A (referencia)", ["gff3", "gz"], "gff_species_a")
         gene_a = st.text_input("🧬 ID de gen en especie A (ej: AT5G25350)", key="gene_a")
     with col2:
-        gff_species_b = st.file_uploader("📂 GFF3 especie B (ortólogo)", type=["gff3", "gz"], key="gff_species_b")
+        gff_species_b, gff_species_b_name, fuente_b = cargar_archivo_con_opcion("GFF3 especie B (ortólogo)", ["gff3", "gz"], "gff_species_b")
         gene_b = st.text_input("🧬 ID de gen ortólogo en especie B", key="gene_b")
 
     if gff_species_a and gff_species_b and gene_a and gene_b:
-        is_gz_a = gff_species_a.name.endswith(".gz")
-        is_gz_b = gff_species_b.name.endswith(".gz")
+        is_gz_a = gff_species_a_name.endswith(".gz") if gff_species_a_name else False
+        is_gz_b = gff_species_b_name.endswith(".gz") if gff_species_b_name else False
 
         center_a, upstream_a, downstream_a = extract_neighbors(gff_species_a, gene_a, is_gz=is_gz_a)
         center_b, upstream_b, downstream_b = extract_neighbors(gff_species_b, gene_b, is_gz=is_gz_b)
@@ -203,75 +244,118 @@ with st.expander("🧬 Comparar genes vecinos entre dos especies (sintenia compa
         else:
             st.error("No se pudieron obtener los genes vecinos de una de las especies.")
 
+        if fuente_a == "Elegir desde carpeta 'data'":
+            gff_species_a.close()
+        if fuente_b == "Elegir desde carpeta 'data'":
+            gff_species_b.close()
+
+
 from compare_neighbors_utils import compare_gene_neighbors
-
-
 from visual_synteny import plot_synteny_tracks
 
 with st.expander("🧬 Comparar genes vecinos + visualización"):
     col1, col2 = st.columns(2)
     with col1:
-        gff_species_a = st.file_uploader("📂 GFF3 especie A (referencia)", type=["gff3", "gz"], key="gff_va")
-        gene_a = st.text_input("ID gen especie A", key="gva")
+        gff_species_a, gff_species_a_name, fuente_a = cargar_archivo_con_opcion("GFF3 especie A (referencia)", ["gff3", "gz"], "gff_va")
+        gene_a = st.text_input("ID gen especie A (ej: AT5G25350)", key="gene_viz_a")
     with col2:
-        gff_species_b = st.file_uploader("📂 GFF3 especie B (ortóloga)", type=["gff3", "gz"], key="gff_vb")
-        gene_b = st.text_input("ID gen especie B", key="gvb")
+        gff_species_b, gff_species_b_name, fuente_b = cargar_archivo_con_opcion("GFF3 especie B (ortólogo)", ["gff3", "gz"], "gff_viz_b")
+        gene_b = st.text_input("ID gen especie B (ej: Eucgr.Hxxxx)", key="gene_viz_b")
 
     if gff_species_a and gff_species_b and gene_a and gene_b:
-        isgz_a = gff_species_a.name.endswith(".gz")
-        isgz_b = gff_species_b.name.endswith(".gz")
+        is_gz_a = gff_species_a_name.endswith(".gz") if gff_species_a_name else False
+        is_gz_b = gff_species_b_name.endswith(".gz") if gff_species_b_name else False
 
-        ca, upa, downa = extract_neighbors(gff_species_a, gene_a, is_gz=isgz_a)
-        cb, upb, downb = extract_neighbors(gff_species_b, gene_b, is_gz=isgz_b)
+        dfa, dfb, df_union = compare_gene_neighbors(gff_species_a, gff_species_b, gene_a, gene_b, is_gz_a, is_gz_b)
+        fig = plot_synteny_tracks(dfa, dfb, df_union)
+        st.plotly_chart(fig, use_container_width=True)
 
-        if ca and cb:
-            shared, _, _ = compare_gene_neighbors(upa, downa, upb, downb)
-            st.plotly_chart(plot_synteny_tracks(ca, upa, downa, cb, upb, downb, shared), use_container_width=True)
-        else:
-            st.warning("No se pudieron obtener vecinos de ambos genes.")
+        if fuente_a == "Elegir desde carpeta 'data'":
+            gff_species_a.close()
+        if fuente_b == "Elegir desde carpeta 'data'":
+            gff_species_b.close()
 
-with st.expander("📂 Cargar archivos FASTA / GFF para analizar 3'UTR y exones"):
-    uploaded_fasta = st.file_uploader("Sube archivo .fasta", type=["fasta", "fa"])
-    uploaded_gff = st.file_uploader("Sube archivo .gff o .gff3", type=["gff", "gff3"])
 
-    if uploaded_fasta and uploaded_gff:
-        from io import StringIO
-        from Bio import SeqIO
+def cargar_fasta(file, is_gz=True):
+    if is_gz:
+        return SeqIO.to_dict(SeqIO.parse(gzip.open(file, "rt"), "fasta"))
+    else:
+        return SeqIO.to_dict(SeqIO.parse(file, "fasta"))
 
-        gff_lines = uploaded_gff.read().decode("utf-8").splitlines()
-        fasta_sequences = SeqIO.to_dict(SeqIO.parse(uploaded_fasta, "fasta"))
+def parse_gff3(gff_file, gene_id, is_gz=True):
+    exons = []
+    chrom, gene_start, gene_end, strand = None, None, None, "+"
+    found_gene = False
 
-        utr_lengths = {}
-        exon_counts = {}
-
-        for line in gff_lines:
+    open_func = gzip.open if is_gz else open
+    with open_func(gff_file, "rt") as f:
+        for line in f:
             if line.startswith("#"):
                 continue
-            fields = line.strip().split("\t")
-            if len(fields) < 9:
+            parts = line.strip().split("\t")
+            if len(parts) != 9:
                 continue
-            seqid, source, feature, start, end, score, strand, phase, attributes = fields
-            if feature == "three_prime_UTR":
-                gene_id = attributes.split(";")[0].split("=")[-1]
-                utr_len = int(end) - int(start) + 1
-                utr_lengths[gene_id] = utr_lengths.get(gene_id, 0) + utr_len
-            elif feature == "exon":
-                gene_id = attributes.split(";")[0].split("=")[-1]
-                exon_counts[gene_id] = exon_counts.get(gene_id, 0) + 1
+            seqid, source, feature_type, start, end, score, strand_, phase, attributes = parts
 
-        st.success(f"UTRs detectados: {len(utr_lengths)}, Exones detectados: {len(exon_counts)}")
+            attr_dict = {kv.split("=")[0]: kv.split("=")[1] for kv in attributes.split(";") if "=" in kv}
+            if not found_gene:
+                if (feature_type == "gene" and ("ID" in attr_dict and gene_id in attr_dict["ID"])):
+                    chrom = seqid
+                    gene_start = int(start)
+                    gene_end = int(end)
+                    strand = strand_
+                    found_gene = True
+            if found_gene and feature_type == "exon":
+                parent = attr_dict.get("Parent", "")
+                if gene_id in parent:
+                    exons.append((int(start), int(end)))
 
-        with st.expander("🔍 Mostrar resumen de genes analizados"):
-            for gene_id in sorted(set(utr_lengths.keys()) | set(exon_counts.keys())):
-                st.write(f"🧬 {gene_id} - 3'UTR: {utr_lengths.get(gene_id, 0)} nt, Exones: {exon_counts.get(gene_id, 0)}")
+    return chrom, gene_start, gene_end, strand, sorted(exons)
 
-        if st.checkbox("Actualizar registros existentes con los datos cargados (si coinciden por ID)"):
-            conn = get_connection()
-            c = conn.cursor()
-            for gene_id in utr_lengths:
-                c.execute("UPDATE Records SET utr3 = ? WHERE ortholog_id = ?", (utr_lengths[gene_id], gene_id))
-            for gene_id in exon_counts:
-                c.execute("UPDATE Records SET exons = ? WHERE ortholog_id = ?", (exon_counts[gene_id], gene_id))
-            conn.commit()
-            conn.close()
-            st.success("Registros actualizados con éxito desde los archivos proporcionados.")
+def get_sequence(chrom, start, end, strand, fasta_dict):
+    seq = fasta_dict.get(chrom, None)
+    if not seq:
+        return None
+    region = seq.seq[start - 1:end]
+    return str(region.reverse_complement()) if strand == "-" else str(region)
+
+def get_protein_sequence(gene_id, protein_dict):
+    for record in protein_dict.values():
+        if gene_id in record.description or gene_id in record.id:
+            return str(record.seq)
+    return None
+
+def extraer_secuencia(gff_file, genome_fasta, protein_fasta, gene_id, tipo, is_gz=True):
+    fasta_dict = cargar_fasta(genome_fasta, is_gz)
+    protein_dict = cargar_fasta(protein_fasta, is_gz)
+
+    chrom, start, end, strand, exons = parse_gff3(gff_file, gene_id, is_gz)
+    if chrom is None:
+        return None
+
+    if tipo == "DNA":
+        return get_sequence(chrom, start, end, strand, fasta_dict)
+    elif tipo == "mRNA":
+        mseq = ""
+        for ex_start, ex_end in exons:
+            mseq += get_sequence(chrom, ex_start, ex_end, strand, fasta_dict)
+        return mseq
+    elif tipo == "Proteína":
+        return get_protein_sequence(gene_id, protein_dict)
+
+    return None
+
+
+with st.expander("🧬 Extraer secuencias del gen"):
+    gff_file = st.file_uploader("📄 Archivo GFF3", type=["gff3", "gz"])
+    genome_fasta = st.file_uploader("🧬 FASTA de genoma (DNA)", type=["fa", "fasta", "gz"], key="genome")
+    protein_fasta = st.file_uploader("🧪 FASTA de proteínas", type=["fa", "fasta", "gz"], key="protein")
+    gene_id = st.text_input("🔍 ID del gen (ej: AT5G25350)")
+    tipo = st.selectbox("🧬 Tipo de secuencia a extraer", ["DNA", "mRNA", "Proteína"])
+
+    if gff_file and genome_fasta and protein_fasta and gene_id:
+        seq = extraer_secuencia(gff_file, genome_fasta, protein_fasta, gene_id, tipo, is_gz=True)
+        if seq:
+            st.code(seq, language="text")
+        else:
+            st.error("No se pudo encontrar o extraer la secuencia.")
